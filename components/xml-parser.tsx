@@ -138,9 +138,14 @@ export class XMLParser {
     });
     if (byName) return byName;
 
-    const txt = (el.textContent || "");
-    const cleaned = txt.replace(/\s+/g, " ").trim();
-    return cleaned || null;
+    // CORREÇÃO: Só use textContent se o elemento não tiver outros elementos filhos.
+    if (el.children.length === 0) {
+      const txt = (el.textContent || "");
+      const cleaned = txt.replace(/\s+/g, " ").trim();
+      return cleaned || null;
+    }
+    
+    return null;
   }
 
   private hasFieldChildren(el: Element, fieldTagRegex: RegExp): boolean {
@@ -178,5 +183,3 @@ export class XMLParser {
     console.groupEnd();
   }
 }
-
-export { Input } from "@/components/ui/input"
