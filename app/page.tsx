@@ -8,22 +8,9 @@ import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { FileText, Calculator } from "lucide-react"
-import { XMLParser } from "@/components/xml-parser"
-import { SimilarityCalculator } from "@/components/similarity-calculator"
+import { XMLParser, type ModelData } from "@/components/xml-parser"
+import { SimilarityCalculator, type SimilarityResults } from "@/components/similarity-calculator"
 import { ResultsDisplay } from "@/components/results-display"
-
-interface ModelData {
-  entities: string[]
-  relationships: string[]
-}
-
-interface SimilarityResults {
-  simEa: number
-  simEb: number
-  simEc: number
-  commonEntities: number
-  totalEntities: number
-}
 
 export default function XMLSimilarityReader() {
   const [file1, setFile1] = useState<File | null>(null)
@@ -67,9 +54,8 @@ export default function XMLSimilarityReader() {
       setModel1(parsedModel1)
       setModel2(parsedModel2)
 
-      // Calculate similarity
       const calculator = new SimilarityCalculator()
-      const similarityResults = calculator.calculateSimilarity(parsedModel1, parsedModel2)
+      const similarityResults = await calculator.calculateSimilarity(parsedModel1, parsedModel2)
 
       setResults(similarityResults)
     } catch (err) {
@@ -89,7 +75,6 @@ export default function XMLSimilarityReader() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        {/* Upload Model 1 */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -114,7 +99,6 @@ export default function XMLSimilarityReader() {
           </CardContent>
         </Card>
 
-        {/* Upload Model 2 */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -140,7 +124,6 @@ export default function XMLSimilarityReader() {
         </Card>
       </div>
 
-      {/* Process Button */}
       <div className="mb-6">
         <Button onClick={parseXMLFiles} disabled={!file1 || !file2 || loading} className="w-full" size="lg">
           {loading ? (
@@ -157,14 +140,12 @@ export default function XMLSimilarityReader() {
         </Button>
       </div>
 
-      {/* Error Display */}
       {error && (
         <Alert className="mb-6" variant="destructive">
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
-      {/* Loading Progress */}
       {loading && (
         <Card className="mb-6">
           <CardContent className="pt-6">
@@ -179,7 +160,6 @@ export default function XMLSimilarityReader() {
         </Card>
       )}
 
-      {/* Results */}
       {results && model1 && model2 && <ResultsDisplay results={results} model1={model1} model2={model2} />}
     </div>
   )

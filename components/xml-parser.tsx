@@ -1,14 +1,16 @@
+import * as React from "react"
+import { cn } from "@/lib/utils"
+
 export interface ModelData {
   entities: string[];
   relationships: string[];
 }
 
 type ExtractConfig = {
-  // Você pode ajustar depois, mas já cobre a maioria dos esquemas
-  nameAttrRegex: RegExp;            // atributos que carregam "nome" da entidade
-  fieldTagRegex: RegExp;            // tags que representam campos/atributos de uma entidade
-  relationshipAttrRegex: RegExp;    // atributos que indicam relacionamento/ref
-  relationshipTagRegex: RegExp;     // tags típicas de relacionamento
+  nameAttrRegex: RegExp;
+  fieldTagRegex: RegExp;
+  relationshipAttrRegex: RegExp;
+  relationshipTagRegex: RegExp;
 };
 
 const DEFAULT_CFG: ExtractConfig = {
@@ -55,41 +57,22 @@ export class XMLParser {
     }
   }
 
-  /** ===== Heurística adaptativa para entidades =====
-   *  Regras:
-   *  1) Qualquer elemento que tenha um atributo que case com nameAttrRegex => vira entidade com esse valor.
-   *  2) Qualquer elemento que seja "pai" de tags que pareçam campos (fieldTagRegex) => o próprio elemento vira entidade (usa atributo de nome se existir; senão, usa tag + índice).
-   *  3) Remove duplicados, normaliza espaços/capitalização.
-   */
   private extractEntitiesAdaptive(xmlDoc: Document, cfg: ExtractConfig): string[] {
     const out: string[] = [];
     const seen = new Set<string>();
-
     const all = xmlDoc.getElementsByTagName("*");
-    // Índice por tagName para fallback estável
-    const idxCounter: Record<string, number> = {};
 
     for (let i = 0; i < all.length; i++) {
       const el = all[i] as Element;
       const local = this.localName(el);
 
-      // Regra 1: atributo com "name"
-      let candidate = this.pickNameAttr(el, cfg.nameAttrRegex);
-
-      // normalize internal whitespace for candidate (collapse newlines/tabs/multiple spaces)
-      if (candidate) candidate = candidate.replace(/\s+/g, " ").trim();
-
-      // Regra 2: pai com filhos "campo"
+      let candidate: string | null = null;
+      candidate = this.pickNameAttr(el, cfg.nameAttrRegex);
+      
       if (!candidate && this.hasFieldChildren(el, cfg.fieldTagRegex)) {
-        candidate = this.pickNameAttr(el, cfg.nameAttrRegex);
-        if (!candidate) {
-          // Fallback "estável": tagName + contador (evita cair em "somente nomes de tag" iguais entre XMLs)
-          const key = local.toLowerCase();
-          idxCounter[key] = (idxCounter[key] ?? 0) + 1;
-          candidate = `${local}#${idxCounter[key]}`;
-        }
+        candidate = local;
       }
-
+      
       if (candidate) {
         const cleaned = candidate.replace(/\s+/g, " ").trim();
         const norm = this.normalize(cleaned);
@@ -103,11 +86,6 @@ export class XMLParser {
     return out;
   }
 
-  /** ===== Heurística adaptativa para relacionamentos =====
-   *  Regras:
-   *  1) Tags típicas de relacionamento (relationshipTagRegex) => extrai atributos “nome” ou “ref”.
-   *  2) Quaisquer atributos de qualquer elemento que casem com relationshipAttrRegex => adiciona.
-   */
   private extractRelationshipsAdaptive(xmlDoc: Document, cfg: ExtractConfig): string[] {
     const out: string[] = [];
     const seen = new Set<string>();
@@ -117,7 +95,6 @@ export class XMLParser {
       const el = all[i] as Element;
       const local = this.localName(el);
 
-      // Regra 1: por tag
       if (cfg.relationshipTagRegex.test(local)) {
         const rawName =
           this.pickNameAttr(el, /(name|label|type|id)$/i) ||
@@ -131,7 +108,6 @@ export class XMLParser {
         }
       }
 
-      // Regra 2: por atributo (ref/fk/etc.)
       Array.from(el.attributes).forEach((attr) => {
         if (cfg.relationshipAttrRegex.test(attr.name)) {
           const raw = (attr.value || "");
@@ -148,9 +124,7 @@ export class XMLParser {
     return out;
   }
 
-  // ===== Helpers =====
   private pickNameAttr(el: Element, rx: RegExp): string | null {
-    // 1) Qualquer atributo cujo NOME case com o regex
     let byName: string | null = null;
     Array.from(el.attributes).some((attr) => {
       if (rx.test(attr.name)) {
@@ -164,7 +138,6 @@ export class XMLParser {
     });
     if (byName) return byName;
 
-    // 2) Se não achou, tenta conteúdo de texto não vazio (às vezes o nome vem como conteúdo)
     const txt = (el.textContent || "");
     const cleaned = txt.replace(/\s+/g, " ").trim();
     return cleaned || null;
@@ -180,7 +153,6 @@ export class XMLParser {
   }
 
   private localName(el: Element): string {
-    // Suporta namespaces (ex.: <edmx:EntityType> => "EntityType")
     return (el.localName || el.tagName || "").replace(/^[^:]+:/, "");
   }
 
@@ -206,3 +178,5 @@ export class XMLParser {
     console.groupEnd();
   }
 }
+
+export { Input } from "@/components/ui/input"

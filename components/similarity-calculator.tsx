@@ -1,4 +1,3 @@
-// similarity-calculator.ts
 import type { ModelData } from "./xml-parser";
 
 /* ======================= Tipos públicos ======================= */
@@ -17,32 +16,20 @@ export interface SynonymProvider {
   getSynonyms(term: string): Promise<Set<string>>;
 }
 
-/* ======================= Normalização =========================
-   - Usamos NFC externamente e NFD somente no trecho que remove diacríticos
-   - Transformamos espaços/hífens em "_" apenas para tokenização
-   - Removemos pontuação e símbolos, preservando letras/dígitos/_
-================================================================= */
-function toNFC(s: string): string {
-  return (s ?? "").normalize("NFC");
-}
-
 function normalizeToken(s: string): string {
-  const base = toNFC(s).trim().toLowerCase();
-  // Remove diacríticos usando NFD apenas durante a limpeza
+  const base = (s ?? "").trim().toLowerCase();
   const noDia = base.normalize("NFD").replace(/\p{Diacritic}/gu, "");
   return noDia
-    .replace(/[\s\-]+/g, "_")          // espaços/hífens → _
-    .replace(/[^\p{L}\p{N}_]/gu, "")   // remove pontuação e símbolos
-    .replace(/^_+|_+$/g, "");          // remove _ nas bordas
+    .replace(/[\s\-]+/g, "_")
+    .replace(/[^\p{L}\p{N}_]/gu, "")
+    .replace(/^_+|_+$/g, "");
 }
 
 function splitTokens(s: string): string[] {
   return normalizeToken(s).split("_").filter(Boolean);
 }
 
-/* Pequenos utilitários de comparação */
 function jstr(x: string) {
-  // Mostra invisíveis no log: espaços, \uXXXX etc
   return JSON.stringify(x);
 }
 
@@ -60,8 +47,7 @@ export class ConceptNetProvider implements SynonymProvider {
   ) {}
 
   private parseTermPath(path: string): string | null {
-    // exemplos: "/c/pt/aluno", "/c/pt/estudante/n"
-    const parts = (path || "").split("/").filter(Boolean); // ["c","pt","aluno"]...
+    const parts = (path || "").split("/").filter(Boolean);
     const raw = parts[2] ?? "";
     const cleaned = raw.replace(/_/g, " ");
     const norm = normalizeToken(cleaned);
@@ -75,7 +61,7 @@ export class ConceptNetProvider implements SynonymProvider {
   }
 
   async getSynonyms(term: string): Promise<Set<string>> {
-    const q = normalizeToken(term).replace(/_/g, " "); // ConceptNet prefere espaço
+    const q = normalizeToken(term).replace(/_/g, " ");
     if (!q) return new Set();
 
     const encoded = encodeURIComponent(q);
@@ -93,7 +79,6 @@ export class ConceptNetProvider implements SynonymProvider {
         const json = await this.fetchJSON(url, controller.signal);
         const edges: any[] = Array.isArray(json?.edges) ? json.edges : [];
         for (const e of edges) {
-          // se a query foi "start", o sinônimo está em e.end.term; se foi "end", está em e.start.term
           const other = url.includes("?start=") ? e?.end?.term : e?.start?.term;
           const norm = this.parseTermPath(other || "");
           if (norm) out.add(norm);
@@ -142,13 +127,11 @@ export class SimilarityCalculator {
     private levenshteinThreshold = 0.8
   ) {}
 
-  /* ------------------- API pública principal ------------------- */
   async calculateSimilarity(
     model1: ModelData,
     model2: ModelData,
-    weights: { W_E: number; W_R: number } = { W_E: 0.5, W_R: 0.5 } // W_R reservado para relações
+    weights: { W_E: number; W_R: number } = { W_E: 0.5, W_R: 0.5 }
   ): Promise<SimilarityResults> {
-    // Logs que ajudam a diagnosticar diferenças invisíveis
     console.log("[SimilarityCalculator] Model 1 Entities:", model1.entities.map(jstr));
     console.log("[SimilarityCalculator] Model 2 Entities:", model2.entities.map(jstr));
 
@@ -161,7 +144,6 @@ export class SimilarityCalculator {
     const { simEc, commonEntitiesEc } = await this.calculateSimEc(model1.entities, model2.entities);
     console.log("[SimilarityCalculator] simEc:", simEc, "commonEntitiesEc:", commonEntitiesEc.map(jstr));
 
-    // União (normalizada) das entidades em comum entre as três métricas
     const union = new Set<string>([
       ...commonEntitiesEa.map(normalizeToken),
       ...commonEntitiesEb.map(normalizeToken),
@@ -173,9 +155,8 @@ export class SimilarityCalculator {
     const simE = diceCoefficient(commonEntities, model1.entities.length, model2.entities.length);
     console.log("[SimilarityCalculator] simE (global entidades):", simE);
 
-    // Placeholder para combinação com relações quando você as incorporar
-    const simM = weights.W_E * simE; // + weights.W_R * simR (no futuro)
-    void simM; // por enquanto não retornamos simM; mantido para evolução
+    const simM = weights.W_E * simE;
+    void simM;
 
     return {
       simEa,
@@ -189,7 +170,6 @@ export class SimilarityCalculator {
     };
   }
 
-  /* -------------------- Métrica Ea (exata) --------------------- */
   private async calculateSimEa(
     entities1: string[],
     entities2: string[]
@@ -210,7 +190,6 @@ export class SimilarityCalculator {
     return { simEa, commonEntitiesEa: commons };
   }
 
-  /* ----------------- Métrica Eb (flex + edição) ---------------- */
   private async calculateSimEb(
     entities1: string[],
     entities2: string[]
@@ -225,7 +204,6 @@ export class SimilarityCalculator {
 
       for (let i = 0; i < norm2.length; i++) {
         const ne2 = norm2[i];
-        // Evita falsos positivos triviais de substring muito curta
         const short = Math.min(ne1.length, ne2.length) <= 3;
 
         if (
@@ -248,10 +226,6 @@ export class SimilarityCalculator {
     return { simEb, commonEntitiesEb: commons };
   }
 
-  /* --------------- Métrica Ec (por sinônimos) ------------------
-     - Tokeniza cada entidade
-     - Se QUALQUER token de A == B (ou é sinônimo) → conta
-  ---------------------------------------------------------------- */
   private async calculateSimEc(
     entities1: string[],
     entities2: string[]
@@ -288,8 +262,7 @@ export class SimilarityCalculator {
     return { simEc, commonEntitiesEc: commons };
   }
 
-  /* ------------------- Sinônimos com cache --------------------- */
-  private cache = new Map<string, Set<string>>(); // chave: termo normalizado
+  private cache = new Map<string, Set<string>>();
 
   private async areSynonymsAPI(a: string, b: string): Promise<boolean> {
     const na = normalizeToken(a);
@@ -305,7 +278,6 @@ export class SimilarityCalculator {
           const set = await p.getSynonyms(na);
           set.forEach((w) => syns!.add(w));
         } catch {
-          // tenta próximo provider
         }
       }
       this.cache.set(na, syns);
@@ -313,7 +285,6 @@ export class SimilarityCalculator {
     return syns.has(nb);
   }
 
-  /* ----------------- Similaridade de Levenshtein ---------------- */
   private levenshtein(a: string, b: string): number {
     const len1 = a.length, len2 = b.length;
     if (!len1 && !len2) return 1;
