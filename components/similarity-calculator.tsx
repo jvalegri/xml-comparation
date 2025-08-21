@@ -1,46 +1,181 @@
-import type { ModelData } from "./xml-parser"
+// similarity-calculator.ts
+import type { ModelData } from "./xml-parser";
 
+/* ======================= Tipos públicos ======================= */
 export interface SimilarityResults {
-  simEa: number
-  simEb: number
-  simEc: number
-  commonEntities: number
-  totalEntities: number
-  commonEntitiesEa: string[]
-  commonEntitiesEb: string[]
-  commonEntitiesEc: string[]
+  simEa: number;
+  simEb: number;
+  simEc: number;
+  commonEntities: number;
+  totalEntities: number;
+  commonEntitiesEa: string[];
+  commonEntitiesEb: string[];
+  commonEntitiesEc: string[];
 }
 
-export class SimilarityCalculator {
-  private synonyms: { [key: string]: string[] } = {
-    user: ["usuario", "cliente", "person", "pessoa", "utilizador"],
-    product: ["produto", "item", "article", "artigo", "mercadoria"],
-    order: ["pedido", "compra", "purchase", "venda", "encomenda"],
-    customer: ["cliente", "user", "usuario", "consumidor", "comprador"],
-    employee: ["funcionario", "worker", "staff", "colaborador", "empregado"],
-    company: ["empresa", "organization", "corporacao", "firma", "organizacao"],
-    address: ["endereco", "location", "localizacao", "local", "morada"],
-    phone: ["telefone", "contact", "contato", "numero", "telemovel"],
-    email: ["correio", "mail", "electronic_mail", "e_mail", "email_address"],
-    department: ["departamento", "sector", "setor", "divisao", "area"],
-    project: ["projeto", "projecto", "initiative", "iniciativa", "empreendimento"],
-    task: ["tarefa", "activity", "atividade", "trabalho", "funcao"],
-    report: ["relatorio", "documento", "document", "arquivo", "ficheiro"],
+export interface SynonymProvider {
+  getSynonyms(term: string): Promise<Set<string>>;
+}
+
+/* ======================= Normalização =========================
+   - Usamos NFC externamente e NFD somente no trecho que remove diacríticos
+   - Transformamos espaços/hífens em "_" apenas para tokenização
+   - Removemos pontuação e símbolos, preservando letras/dígitos/_
+================================================================= */
+function toNFC(s: string): string {
+  return (s ?? "").normalize("NFC");
+}
+
+function normalizeToken(s: string): string {
+  const base = toNFC(s).trim().toLowerCase();
+  // Remove diacríticos usando NFD apenas durante a limpeza
+  const noDia = base.normalize("NFD").replace(/\p{Diacritic}/gu, "");
+  return noDia
+    .replace(/[\s\-]+/g, "_")          // espaços/hífens → _
+    .replace(/[^\p{L}\p{N}_]/gu, "")   // remove pontuação e símbolos
+    .replace(/^_+|_+$/g, "");          // remove _ nas bordas
+}
+
+function splitTokens(s: string): string[] {
+  return normalizeToken(s).split("_").filter(Boolean);
+}
+
+/* Pequenos utilitários de comparação */
+function jstr(x: string) {
+  // Mostra invisíveis no log: espaços, \uXXXX etc
+  return JSON.stringify(x);
+}
+
+function diceCoefficient(common: number, lenA: number, lenB: number): number {
+  const denom = lenA + lenB;
+  return denom ? (2 * common) / denom : 0;
+}
+
+/* ================== Providers de Sinônimos ==================== */
+export class ConceptNetProvider implements SynonymProvider {
+  constructor(
+    private lang = "pt",
+    private baseUrl = "https://api.conceptnet.io",
+    private timeoutMs = 4000
+  ) {}
+
+  private parseTermPath(path: string): string | null {
+    // exemplos: "/c/pt/aluno", "/c/pt/estudante/n"
+    const parts = (path || "").split("/").filter(Boolean); // ["c","pt","aluno"]...
+    const raw = parts[2] ?? "";
+    const cleaned = raw.replace(/_/g, " ");
+    const norm = normalizeToken(cleaned);
+    return norm || null;
   }
 
-  calculateSimilarity(model1: ModelData, model2: ModelData): SimilarityResults {
-    console.log("[v0] Starting similarity calculation")
-    console.log("[v0] Model 1 entities:", model1.entities)
-    console.log("[v0] Model 2 entities:", model2.entities)
+  private async fetchJSON(url: string, signal: AbortSignal): Promise<any | null> {
+    const res = await fetch(url, { signal });
+    if (!res.ok) return null;
+    return res.json();
+  }
 
-    const { simEa, commonEntitiesEa } = this.calculateSimEa(model1.entities, model2.entities)
-    const { simEb, commonEntitiesEb } = this.calculateSimEb(model1.entities, model2.entities)
-    const { simEc, commonEntitiesEc } = this.calculateSimEc(model1.entities, model2.entities)
+  async getSynonyms(term: string): Promise<Set<string>> {
+    const q = normalizeToken(term).replace(/_/g, " "); // ConceptNet prefere espaço
+    if (!q) return new Set();
 
-    const commonEntities = commonEntitiesEa.length
-    const totalEntities = model1.entities.length + model2.entities.length
+    const encoded = encodeURIComponent(q);
+    const urls = [
+      `${this.baseUrl}/query?start=/c/${this.lang}/${encoded}&rel=/r/Synonym&limit=1000`,
+      `${this.baseUrl}/query?end=/c/${this.lang}/${encoded}&rel=/r/Synonym&limit=1000`,
+    ];
 
-    console.log("[v0] Similarity results - simEa:", simEa, "simEb:", simEb, "simEc:", simEc)
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const out = new Set<string>();
+      for (const url of urls) {
+        const json = await this.fetchJSON(url, controller.signal);
+        const edges: any[] = Array.isArray(json?.edges) ? json.edges : [];
+        for (const e of edges) {
+          // se a query foi "start", o sinônimo está em e.end.term; se foi "end", está em e.start.term
+          const other = url.includes("?start=") ? e?.end?.term : e?.start?.term;
+          const norm = this.parseTermPath(other || "");
+          if (norm) out.add(norm);
+        }
+      }
+      return out;
+    } catch {
+      return new Set();
+    } finally {
+      clearTimeout(to);
+    }
+  }
+}
+
+export class DatamuseProvider implements SynonymProvider {
+  constructor(private baseUrl = "https://api.datamuse.com/words", private timeoutMs = 3000) {}
+  async getSynonyms(term: string): Promise<Set<string>> {
+    const q = normalizeToken(term);
+    if (!q) return new Set();
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}?ml=${encodeURIComponent(q)}`, { signal: controller.signal });
+      if (!res.ok) return new Set();
+      const data = await res.json();
+      const out = new Set<string>();
+      if (Array.isArray(data)) {
+        for (const d of data) {
+          const w = normalizeToken(d?.word ?? "");
+          if (w) out.add(w);
+        }
+      }
+      return out;
+    } catch {
+      return new Set();
+    } finally {
+      clearTimeout(to);
+    }
+  }
+}
+
+/* =================== Similarity Calculator ==================== */
+export class SimilarityCalculator {
+  constructor(
+    private providers: SynonymProvider[] = [new ConceptNetProvider()],
+    private levenshteinThreshold = 0.8
+  ) {}
+
+  /* ------------------- API pública principal ------------------- */
+  async calculateSimilarity(
+    model1: ModelData,
+    model2: ModelData,
+    weights: { W_E: number; W_R: number } = { W_E: 0.5, W_R: 0.5 } // W_R reservado para relações
+  ): Promise<SimilarityResults> {
+    // Logs que ajudam a diagnosticar diferenças invisíveis
+    console.log("[SimilarityCalculator] Model 1 Entities:", model1.entities.map(jstr));
+    console.log("[SimilarityCalculator] Model 2 Entities:", model2.entities.map(jstr));
+
+    const { simEa, commonEntitiesEa } = await this.calculateSimEa(model1.entities, model2.entities);
+    console.log("[SimilarityCalculator] simEa:", simEa, "commonEntitiesEa:", commonEntitiesEa.map(jstr));
+
+    const { simEb, commonEntitiesEb } = await this.calculateSimEb(model1.entities, model2.entities);
+    console.log("[SimilarityCalculator] simEb:", simEb, "commonEntitiesEb:", commonEntitiesEb.map(jstr));
+
+    const { simEc, commonEntitiesEc } = await this.calculateSimEc(model1.entities, model2.entities);
+    console.log("[SimilarityCalculator] simEc:", simEc, "commonEntitiesEc:", commonEntitiesEc.map(jstr));
+
+    // União (normalizada) das entidades em comum entre as três métricas
+    const union = new Set<string>([
+      ...commonEntitiesEa.map(normalizeToken),
+      ...commonEntitiesEb.map(normalizeToken),
+      ...commonEntitiesEc.map(normalizeToken),
+    ]);
+
+    const totalEntities = model1.entities.length + model2.entities.length;
+    const commonEntities = union.size;
+    const simE = diceCoefficient(commonEntities, model1.entities.length, model2.entities.length);
+    console.log("[SimilarityCalculator] simE (global entidades):", simE);
+
+    // Placeholder para combinação com relações quando você as incorporar
+    const simM = weights.W_E * simE; // + weights.W_R * simR (no futuro)
+    void simM; // por enquanto não retornamos simM; mantido para evolução
 
     return {
       simEa,
@@ -51,189 +186,150 @@ export class SimilarityCalculator {
       commonEntitiesEa,
       commonEntitiesEb,
       commonEntitiesEc,
-    }
+    };
   }
 
-  private calculateSimEa(entities1: string[], entities2: string[]): { simEa: number; commonEntitiesEa: string[] } {
-    let commonCount = 0
-    const commonEntitiesEa: string[] = []
+  /* -------------------- Métrica Ea (exata) --------------------- */
+  private async calculateSimEa(
+    entities1: string[],
+    entities2: string[]
+  ): Promise<{ simEa: number; commonEntitiesEa: string[] }> {
+    const set2 = new Set(entities2.map(normalizeToken));
+    let common = 0;
+    const commons: string[] = [];
 
     for (const e1 of entities1) {
-      let found = false
-      // Para cada E2 em EM2 faça
-      for (const e2 of entities2) {
-        // Se E1 = E2 (exact match)
-        if (e1.toLowerCase().trim() === e2.toLowerCase().trim()) {
-          commonCount++
-          commonEntitiesEa.push(e1)
-          found = true
-          break // Stop after finding first match
-        }
+      const ne1 = normalizeToken(e1);
+      if (set2.has(ne1)) {
+        common++;
+        commons.push(e1);
       }
     }
 
-    const simEa =
-      entities1.length + entities2.length > 0 ? (2 * commonCount) / (entities1.length + entities2.length) : 0
-
-    console.log(
-      "[v0] simEa calculation - commonCount:",
-      commonCount,
-      "EM1.length:",
-      entities1.length,
-      "EM2.length:",
-      entities2.length,
-      "formula: (2 *",
-      commonCount,
-      ") / (",
-      entities1.length,
-      "+",
-      entities2.length,
-      ") =",
-      simEa,
-    )
-
-    return { simEa, commonEntitiesEa }
+    const simEa = diceCoefficient(common, entities1.length, entities2.length);
+    return { simEa, commonEntitiesEa: commons };
   }
 
-  private calculateSimEb(entities1: string[], entities2: string[]): { simEb: number; commonEntitiesEb: string[] } {
-    let commonCount = 0
-    const commonEntitiesEb: string[] = []
+  /* ----------------- Métrica Eb (flex + edição) ---------------- */
+  private async calculateSimEb(
+    entities1: string[],
+    entities2: string[]
+  ): Promise<{ simEb: number; commonEntitiesEb: string[] }> {
+    const norm2 = entities2.map(normalizeToken);
+    let common = 0;
+    const commons: string[] = [];
 
     for (const e1 of entities1) {
-      let found = false
-      for (const e2 of entities2) {
-        const e1Lower = e1.toLowerCase().trim()
-        const e2Lower = e2.toLowerCase().trim()
+      const ne1 = normalizeToken(e1);
+      let hit = false;
 
-        // Enhanced matching: exact, contains, or high similarity
+      for (let i = 0; i < norm2.length; i++) {
+        const ne2 = norm2[i];
+        // Evita falsos positivos triviais de substring muito curta
+        const short = Math.min(ne1.length, ne2.length) <= 3;
+
         if (
-          e1Lower === e2Lower ||
-          e1Lower.includes(e2Lower) ||
-          e2Lower.includes(e1Lower) ||
-          this.calculateLevenshteinSimilarity(e1Lower, e2Lower) > 0.8
+          ne1 === ne2 ||
+          (!short && (ne1.includes(ne2) || ne2.includes(ne1))) ||
+          this.levenshtein(ne1, ne2) >= this.levenshteinThreshold
         ) {
-          commonCount++
-          commonEntitiesEb.push(e1)
-          found = true
-          break
+          hit = true;
+          break;
         }
+      }
+
+      if (hit) {
+        common++;
+        commons.push(e1);
       }
     }
 
-    const simEb =
-      entities1.length + entities2.length > 0 ? (2 * commonCount) / (entities1.length + entities2.length) : 0
-
-    console.log(
-      "[v0] simEb calculation - commonCount:",
-      commonCount,
-      "EM1.length:",
-      entities1.length,
-      "EM2.length:",
-      entities2.length,
-      "formula: (2 *",
-      commonCount,
-      ") / (",
-      entities1.length,
-      "+",
-      entities2.length,
-      ") =",
-      simEb,
-    )
-
-    return { simEb, commonEntitiesEb }
+    const simEb = diceCoefficient(common, entities1.length, entities2.length);
+    return { simEb, commonEntitiesEb: commons };
   }
 
-  private calculateSimEc(entities1: string[], entities2: string[]): { simEc: number; commonEntitiesEc: string[] } {
-    let commonCount = 0
-    const commonEntitiesEc: string[] = []
+  /* --------------- Métrica Ec (por sinônimos) ------------------
+     - Tokeniza cada entidade
+     - Se QUALQUER token de A == B (ou é sinônimo) → conta
+  ---------------------------------------------------------------- */
+  private async calculateSimEc(
+    entities1: string[],
+    entities2: string[]
+  ): Promise<{ simEc: number; commonEntitiesEc: string[] }> {
+    const tokens2 = entities2.map(splitTokens);
+    let common = 0;
+    const commons: string[] = [];
 
     for (const e1 of entities1) {
-      let found = false
-      // Para cada E2 em EM2 faça
-      for (const e2 of entities2) {
-        // Se E1 = APIsinonimo(E2)
-        if (this.areSynonyms(e1, e2)) {
-          commonCount++
-          commonEntitiesEc.push(e1)
-          found = true
-          break // Stop after finding first match (as specified in algorithm)
+      const t1 = splitTokens(e1);
+      let hit = false;
+
+      for (let j = 0; j < tokens2.length && !hit; j++) {
+        const t2 = tokens2[j];
+
+        for (const a of t1) {
+          for (const b of t2) {
+            if (a === b || (await this.areSynonymsAPI(a, b))) {
+              hit = true;
+              break;
+            }
+          }
+          if (hit) break;
         }
       }
-    }
 
-    const simEc = entities1.length > 0 ? commonCount / entities1.length : 0
-
-    console.log(
-      "[v0] simEc calculation - commonCount:",
-      commonCount,
-      "EM1.length:",
-      entities1.length,
-      "formula:",
-      commonCount,
-      "/",
-      entities1.length,
-      "=",
-      simEc,
-    )
-
-    return { simEc, commonEntitiesEc }
-  }
-
-  private areSynonyms(word1: string, word2: string): boolean {
-    const w1 = word1.toLowerCase().trim()
-    const w2 = word2.toLowerCase().trim()
-
-    // Exact match
-    if (w1 === w2) return true
-
-    // Check direct synonyms
-    if (this.synonyms[w1]?.includes(w2)) return true
-    if (this.synonyms[w2]?.includes(w1)) return true
-
-    // Check if both words appear in the same synonym group
-    for (const [key, synonymList] of Object.entries(this.synonyms)) {
-      if ((key === w1 || synonymList.includes(w1)) && (key === w2 || synonymList.includes(w2))) {
-        return true
+      if (hit) {
+        common++;
+        commons.push(e1);
       }
     }
 
-    if (this.calculateLevenshteinSimilarity(w1, w2) > 0.85) {
-      return true
-    }
-
-    return false
+    const simEc = diceCoefficient(common, entities1.length, entities2.length);
+    return { simEc, commonEntitiesEc: commons };
   }
 
-  private calculateLevenshteinSimilarity(str1: string, str2: string): number {
-    const matrix = []
-    const len1 = str1.length
-    const len2 = str2.length
+  /* ------------------- Sinônimos com cache --------------------- */
+  private cache = new Map<string, Set<string>>(); // chave: termo normalizado
 
-    if (len1 === 0) return len2 === 0 ? 1 : 0
-    if (len2 === 0) return 0
+  private async areSynonymsAPI(a: string, b: string): Promise<boolean> {
+    const na = normalizeToken(a);
+    const nb = normalizeToken(b);
+    if (!na || !nb) return false;
+    if (na === nb) return true;
 
-    // Initialize matrix
-    for (let i = 0; i <= len1; i++) {
-      matrix[i] = [i]
+    let syns = this.cache.get(na);
+    if (!syns) {
+      syns = new Set<string>();
+      for (const p of this.providers) {
+        try {
+          const set = await p.getSynonyms(na);
+          set.forEach((w) => syns!.add(w));
+        } catch {
+          // tenta próximo provider
+        }
+      }
+      this.cache.set(na, syns);
     }
-    for (let j = 0; j <= len2; j++) {
-      matrix[0][j] = j
-    }
+    return syns.has(nb);
+  }
 
-    // Fill matrix
+  /* ----------------- Similaridade de Levenshtein ---------------- */
+  private levenshtein(a: string, b: string): number {
+    const len1 = a.length, len2 = b.length;
+    if (!len1 && !len2) return 1;
+    if (!len1 || !len2) return 0;
+
+    const dp: number[][] = Array.from({ length: len1 + 1 }, () => Array(len2 + 1).fill(0));
+    for (let i = 0; i <= len1; i++) dp[i][0] = i;
+    for (let j = 0; j <= len2; j++) dp[0][j] = j;
+
     for (let i = 1; i <= len1; i++) {
       for (let j = 1; j <= len2; j++) {
-        const cost = str1[i - 1] === str2[j - 1] ? 0 : 1
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j] + 1, // deletion
-          matrix[i][j - 1] + 1, // insertion
-          matrix[i - 1][j - 1] + cost, // substitution
-        )
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
       }
     }
-
-    const distance = matrix[len1][len2]
-    const maxLength = Math.max(len1, len2)
-    return maxLength > 0 ? 1 - distance / maxLength : 1
+    const dist = dp[len1][len2];
+    return 1 - dist / Math.max(len1, len2);
   }
 }

@@ -2,11 +2,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { CheckCircle, Info } from "lucide-react"
-import type { SimilarityResults } from "./similarity-calculator"
+import type { SimilarityResult } from "../lib/similarity-calculator"
 import type { ModelData } from "./xml-parser"
 
 interface ResultsDisplayProps {
-  results: SimilarityResults
+  results: SimilarityResult
   model1: ModelData
   model2: ModelData
 }
